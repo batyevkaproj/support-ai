@@ -13,24 +13,29 @@ DEVICE_ID = 67                 # Voicemeeter Out B1
 INPUT_RATE = 48000
 TARGET_RATE = 16000            # <<< ОБЯЗАТЕЛЬНО для Whisper
 CHANNELS = 2
-BLOCKSIZE = 1024
+
 
 VOLUME_THRESHOLD = 0.004
-SILENCE_TIMEOUT = 1.5
-MIN_AUDIO_SECONDS = 1.0        # минимальная длина фразы (после ресемпла)
+SILENCE_TIMEOUT = 0.5
+MIN_AUDIO_SECONDS = 0.5        # минимальная длина фразы (после ресемпла)
 
-MODEL_SIZE = "small"
-LANG = "ru"                    # "ru" или "uk"
-# =========================================
+MODEL_SIZE = "medium"   # на GPU можно
+LANG = "uk"
+
+BLOCKSIZE = 512
+SILENCE_TIMEOUT = 0.5
+MIN_AUDIO_SECONDS = 0.5
+
 
 os.makedirs("calls", exist_ok=True)
 
 print("Loading Whisper model...")
 model = WhisperModel(
     MODEL_SIZE,
-    device="cpu",
-    compute_type="int8"
+    device="cuda",
+    compute_type="float16"
 )
+
 print("Model loaded")
 
 audio_queue = queue.Queue(maxsize=100)
@@ -104,10 +109,13 @@ try:
 
                 segments, _ = model.transcribe(
                     audio_16k,
-                    language=LANG,
+                    language="uk",
+                    initial_prompt="Це телефонна розмова українською мовою.",
+                    beam_size=1,
                     vad_filter=False,
-                    beam_size=5
+                    condition_on_previous_text=False
                 )
+
 
                 text = " ".join(seg.text.strip() for seg in segments).strip()
 
