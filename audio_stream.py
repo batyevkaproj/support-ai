@@ -6,19 +6,22 @@ import os
 import sys
 from datetime import datetime
 from faster_whisper import WhisperModel
+from scipy.signal import resample_poly
 
-# ================== CONFIG ==================
-DEVICE_ID = 67                 # Voicemeeter Out B1 (48000 Hz)
-SAMPLE_RATE = 48000
+# ================= CONFIG =================
+DEVICE_ID = 67                 # Voicemeeter Out B1
+INPUT_RATE = 48000
+TARGET_RATE = 16000            # <<< ОБЯЗАТЕЛЬНО для Whisper
 CHANNELS = 2
 BLOCKSIZE = 1024
 
-VOLUME_THRESHOLD = 0.004       # детект речи
-SILENCE_TIMEOUT = 1.2          # секунд тишины = конец фразы
+VOLUME_THRESHOLD = 0.004
+SILENCE_TIMEOUT = 1.5
+MIN_AUDIO_SECONDS = 1.0        # минимальная длина фразы (после ресемпла)
 
-MODEL_SIZE = "small"           # можно потом medium
-LANG = None                    # авто
-# ============================================
+MODEL_SIZE = "small"
+LANG = "ru"                    # "ru" или "uk"
+# =========================================
 
 os.makedirs("calls", exist_ok=True)
 
@@ -30,12 +33,10 @@ model = WhisperModel(
 )
 print("Model loaded")
 
-audio_queue = queue.Queue(maxsize=50)
-
+audio_queue = queue.Queue(maxsize=100)
 current_audio = []
 last_voice_time = None
 call_active = False
-running = True
 
 
 def rms(data):
@@ -55,12 +56,12 @@ try:
     with sd.InputStream(
         device=DEVICE_ID,
         channels=CHANNELS,
-        samplerate=SAMPLE_RATE,
+        samplerate=INPUT_RATE,
         blocksize=BLOCKSIZE,
         dtype="float32",
         callback=callback
     ):
-        while running:
+        while True:
             try:
                 data = audio_queue.get(timeout=0.1)
             except queue.Empty:
@@ -69,6 +70,7 @@ try:
             vol = rms(data)
             now = time.time()
 
+            # ---- начало речи
             if vol > VOLUME_THRESHOLD:
                 if not call_active:
                     print("📞 Speech detected")
@@ -77,16 +79,34 @@ try:
                 last_voice_time = now
                 current_audio.append(data)
 
-            if call_active and last_voice_time and (now - last_voice_time) > SILENCE_TIMEOUT:
-                print("📴 Silence → transcribing")
+            # ---- конец речи
+            if call_active and (now - last_voice_time) > SILENCE_TIMEOUT:
                 call_active = False
+                print("📴 Silence → transcribing")
 
-                audio_np = np.concatenate(current_audio, axis=0).flatten()
+                audio_np = np.concatenate(current_audio, axis=0)
+
+                # stereo → mono
+                audio_np = audio_np.mean(axis=1)
+
+                # нормализация
+                max_val = np.max(np.abs(audio_np))
+                if max_val > 0:
+                    audio_np = audio_np / max_val * 0.9
+
+                # ресемпл 48k → 16k
+                audio_16k = resample_poly(audio_np, TARGET_RATE, INPUT_RATE)
+
+                duration = len(audio_16k) / TARGET_RATE
+                if duration < MIN_AUDIO_SECONDS:
+                    print("⚠️ Too short, skipping")
+                    continue
 
                 segments, _ = model.transcribe(
-                    audio_np,
+                    audio_16k,
                     language=LANG,
-                    vad_filter=True
+                    vad_filter=False,
+                    beam_size=5
                 )
 
                 text = " ".join(seg.text.strip() for seg in segments).strip()
@@ -103,12 +123,4 @@ try:
 
 except KeyboardInterrupt:
     print("\n🛑 Stopped by user")
-
-    if current_audio:
-        print("⏳ Transcribing last audio...")
-        audio_np = np.concatenate(current_audio, axis=0).flatten()
-        segments, _ = model.transcribe(audio_np)
-        text = " ".join(seg.text.strip() for seg in segments).strip()
-        print("FINAL TEXT:", text)
-
     sys.exit(0)
