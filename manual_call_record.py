@@ -10,16 +10,16 @@ import torch
 from faster_whisper import WhisperModel
 
 # ================= CONFIG =================
-DEVICE_ID = 67            # Voicemeeter Out B1
+DEVICE_ID = 67              # Voicemeeter Output (B)
 INPUT_RATE = 48000
 TARGET_RATE = 16000
 CHANNELS = 2
 BLOCKSIZE = 1024
 
-MODEL_SIZE = "large-v3"   # RTX 4080 тягне
+MODEL_SIZE = "large-v3"     # можно заменить на "medium"
 LANG = "uk"
-PROMPT = "Це телефонна розмова українською мовою."
-MIN_RMS = 0.01            # ❗ мін. рівень мовлення
+
+MIN_RMS = 0.01              # порог речи
 # =========================================
 
 os.makedirs("calls", exist_ok=True)
@@ -59,7 +59,7 @@ try:
             time.sleep(0.1)
 
 except KeyboardInterrupt:
-    print("\n🛑 Recording stopped by user")
+    print("\n🛑 Recording stopped")
 
 # ---------- POST PROCESS ----------
 if not recorded_audio:
@@ -70,52 +70,74 @@ print("🔧 Processing audio...")
 
 audio_np = np.concatenate(recorded_audio, axis=0)
 
-# stereo → mono
-mono = audio_np.mean(axis=1)
+# ================= SPLIT CHANNELS =================
+operator = audio_np[:, 0]   # LEFT
+client   = audio_np[:, 1]   # RIGHT
 
-# RMS check (❗ КРИТИЧНО)
-rms = np.sqrt(np.mean(mono ** 2))
-print(f"🔊 RMS level: {rms:.4f}")
 
-if rms < MIN_RMS:
-    print("❌ No speech detected (too quiet), skipping transcription")
-    sys.exit(0)
+def transcribe_channel(audio, role):
+    rms = np.sqrt(np.mean(audio ** 2))
+    print(f"{role} RMS: {rms:.4f}")
 
-# normalize ONLY if speech exists
-peak = np.max(np.abs(mono)) + 1e-9
-mono = mono / peak * 0.9
+    if rms < MIN_RMS:
+        print(f"❌ {role}: no speech detected")
+        return []
 
-# resample to 16k
-audio_16k = resampy.resample(mono, INPUT_RATE, TARGET_RATE)
+    # normalize
+    peak = np.max(np.abs(audio)) + 1e-9
+    audio = audio / peak * 0.9
 
-print("🧠 Transcribing...")
+    # resample
+    audio_16k = resampy.resample(audio, INPUT_RATE, TARGET_RATE)
 
-segments, info = model.transcribe(
-    audio_16k,
-    language=LANG,
-    initial_prompt=PROMPT,
+    segments, _ = model.transcribe(
+        audio_16k,
+        language=LANG,
 
-    beam_size=1,
-    best_of=1,
-    temperature=0.2,
+        beam_size=1,
+        best_of=1,
+        temperature=0.2,
 
-    vad_filter=True,                     # ❗ ВКЛЮЧИТИ
-    vad_parameters=dict(
-        min_silence_duration_ms=500
-    ),
+        vad_filter=True,
+        vad_parameters=dict(
+            min_silence_duration_ms=400
+        ),
 
-    condition_on_previous_text=False,    # ❗ КЛЮЧОВЕ
-    no_speech_threshold=0.6,
-    compression_ratio_threshold=2.0,
-)
+        condition_on_previous_text=False,
+        no_speech_threshold=0.6,
+        compression_ratio_threshold=2.0,
+    )
 
-text = " ".join(seg.text.strip() for seg in segments).strip()
+    result = []
+    for seg in segments:
+        result.append((
+            seg.start,
+            role,
+            seg.text.strip()
+        ))
 
+    return result
+
+
+print("🧠 Transcribing OPERATOR...")
+dialog = transcribe_channel(operator, "OPERATOR")
+
+print("🧠 Transcribing CLIENT...")
+dialog += transcribe_channel(client, "CLIENT")
+
+# sort by time
+dialog.sort(key=lambda x: x[0])
+
+# ---------- SAVE ----------
 fname = f"calls/call_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.txt"
 with open(fname, "w", encoding="utf-8") as f:
-    f.write(text)
+    for t, role, text in dialog:
+        if text:
+            f.write(f"[{t:06.2f}] {role}: {text}\n")
 
 print(f"\n📝 SAVED {fname}")
-print("====== TEXT ======")
-print(text if text else "[EMPTY]")
-print("==================")
+print("====== DIALOG ======")
+for t, role, text in dialog:
+    if text:
+        print(f"[{t:06.2f}] {role}: {text}")
+print("====================")
